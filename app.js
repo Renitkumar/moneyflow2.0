@@ -208,54 +208,65 @@ function updateLiquidLens(){
 }
 
 function setupLiquidNavigation(){
-  const nav=document.getElementById("bottomNav"), lens=document.getElementById("liquidLens");
-  if(!nav || !lens)return;
+  const nav=document.getElementById("bottomNav");
+  if(!nav)return;
   const pages=["home","history","add","download"];
-  let startX=0,startY=0,startPage="",swiping=false;
+  let startX=0,startY=0,startPage="",tracking=false;
 
   const go=page=>{
     if(!pages.includes(page))return;
     currentPage=page;
     renderPage();
+    requestAnimationFrame(updateLiquidLens);
   };
 
-  // One simple delegated click handler. No pointer capture, no preventDefault on taps.
-  nav.addEventListener("click",e=>{
-    const btn=e.target.closest?.("button[data-page]");
-    if(!btn || swiping)return;
-    go(btn.dataset.page);
+  // Click navigation: deliberately simple and independent from swipe handling.
+  nav.querySelectorAll("button[data-page]").forEach(btn=>{
+    btn.addEventListener("click",ev=>{
+      ev.preventDefault();
+      ev.stopPropagation();
+      go(btn.dataset.page);
+    });
   });
 
-  // Swipe only when the user actually drags horizontally.
-  nav.addEventListener("pointerdown",e=>{
-    if(e.pointerType==="mouse" && e.button!==0)return;
-    const btn=e.target.closest?.("button[data-page]");
-    if(!btn)return;
-    startX=e.clientX; startY=e.clientY; startPage=btn.dataset.page; swiping=false;
+  // Reliable touch swipe for phones/tablets.
+  nav.addEventListener("touchstart",ev=>{
+    if(!ev.touches?.length)return;
+    const t=ev.touches[0];
+    startX=t.clientX; startY=t.clientY;
+    const btn=ev.target.closest?.("button[data-page]");
+    startPage=btn?.dataset.page || currentPage;
+    tracking=true;
   },{passive:true});
 
-  nav.addEventListener("pointermove",e=>{
-    if(!startPage)return;
-    const dx=e.clientX-startX,dy=e.clientY-startY;
-    if(Math.abs(dx)>18 && Math.abs(dx)>Math.abs(dy)*1.2)swiping=true;
+  nav.addEventListener("touchend",ev=>{
+    if(!tracking || !ev.changedTouches?.length)return;
+    const t=ev.changedTouches[0];
+    const dx=t.clientX-startX, dy=t.clientY-startY;
+    tracking=false;
+    if(Math.abs(dx)<60 || Math.abs(dx)<=Math.abs(dy)*1.15)return;
+    const i=pages.indexOf(startPage);
+    if(i<0)return;
+    const next=i+(dx<0?1:-1);
+    if(next>=0 && next<pages.length)go(pages[next]);
   },{passive:true});
 
-  nav.addEventListener("pointerup",e=>{
-    if(!startPage)return;
-    const dx=e.clientX-startX,dy=e.clientY-startY;
-    const isSwipe=Math.abs(dx)>=55 && Math.abs(dx)>Math.abs(dy)*1.2;
-    if(isSwipe){
-      const i=pages.indexOf(startPage);
-      const next=i+(dx<0?1:-1);
-      if(next>=0 && next<pages.length)go(pages[next]);
-    }
-    const wasSwipe=swiping || isSwipe;
-    startPage="";swiping=false;
-    if(wasSwipe)e.stopPropagation();
-  },{passive:true});
-
-  nav.addEventListener("pointercancel",()=>{startPage="";swiping=false;},{passive:true});
-  updateLiquidLens();
+  // Desktop drag swipe.
+  nav.addEventListener("pointerdown",ev=>{
+    if(ev.pointerType!=="mouse" || ev.button!==0)return;
+    const btn=ev.target.closest?.("button[data-page]");
+    startX=ev.clientX; startY=ev.clientY; startPage=btn?.dataset.page || currentPage; tracking=true;
+  });
+  nav.addEventListener("pointerup",ev=>{
+    if(!tracking || ev.pointerType!=="mouse")return;
+    const dx=ev.clientX-startX, dy=ev.clientY-startY;
+    tracking=false;
+    if(Math.abs(dx)<70 || Math.abs(dx)<=Math.abs(dy)*1.15)return;
+    const i=pages.indexOf(startPage), next=i+(dx<0?1:-1);
+    if(i>=0 && next>=0 && next<pages.length)go(pages[next]);
+  });
+  nav.addEventListener("pointercancel",()=>{tracking=false});
+  requestAnimationFrame(updateLiquidLens);
 }
 
 async function adminApi(action, payload={}){
@@ -264,8 +275,10 @@ async function adminApi(action, payload={}){
     method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${token}`},
     body:JSON.stringify(payload)
   });
-  const data=await res.json().catch(()=>({error:"Invalid server response"}));
-  if(!res.ok)throw new Error(data.error||"Admin request failed");
+  const text=await res.text();
+  let data={};
+  try{data=text?JSON.parse(text):{}}catch{data={error:`Server returned ${res.status} instead of JSON. Check that the Vercel /api/admin function is deployed.`}}
+  if(!res.ok)throw new Error(data.error||`Admin request failed (${res.status})`);
   return data;
 }
 
@@ -591,10 +604,10 @@ function renderAdd(p){
     const date=document.getElementById("txDate").value;
     if(!(amount>0)||!note||!date)return toast("Please fill all transaction details","error");
     try{
-      const token=await currentUser.getIdToken();
-      const res=await fetch("/api/user?action=addTransaction",{method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${token}`},body:JSON.stringify({type,amount,note,date})});
-      const data=await res.json().catch(()=>({error:"Invalid server response"}));
-      if(!res.ok)throw new Error(data.error||"Unable to save transaction");
+      const lockedUntil=userProfile?.lockedUntil;
+      if(lockedUntil?.toMillis && lockedUntil.toMillis()>Date.now())throw new Error("Your account is temporarily locked.");
+      // Write directly to Firestore for reliable transaction creation. The rules restrict this to the signed-in owner.
+      await addDoc(collection(db,"users",currentUser.uid,"transactions"),{type,amount,note,date,uid:currentUser.uid,createdAt:serverTimestamp()});
       e.target.reset();
       document.getElementById("txDate").value=iso(new Date());
       document.getElementById("txType").value="credit";
@@ -624,8 +637,10 @@ async function deleteOwnTransaction(id){
   try{
     const token=await currentUser.getIdToken();
     const res=await fetch(`/api/user?action=deleteTransaction`,{method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${token}`},body:JSON.stringify({transactionId:id,passcode})});
-    const data=await res.json().catch(()=>({error:"Invalid server response"}));
-    if(!res.ok)throw new Error(data.error||"Unable to delete transaction");
+    const text=await res.text();
+    let data={};
+    try{data=text?JSON.parse(text):{}}catch{data={error:`Server returned ${res.status} instead of JSON. The Vercel /api/user function is not deployed correctly.`}}
+    if(!res.ok)throw new Error(data.error||`Unable to delete transaction (${res.status})`);
     toast("Transaction deleted","success");
   }catch(e){toast(e.message,"error")}
 }

@@ -3,35 +3,29 @@ service cloud.firestore {
   match /databases/{database}/documents {
     match /users/{userId} {
       allow read: if request.auth != null && request.auth.uid == userId;
-
-      allow create: if request.auth != null
-                    && request.auth.uid == userId;
-
+      allow create: if request.auth != null && request.auth.uid == userId;
       allow update: if request.auth != null
                     && request.auth.uid == userId
                     && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
                       'displayName','email','positiveDurationDays','negativeDurationDays',
                       'positiveResetAt','negativeResetAt','balanceResetAt','updatedAt','lockedUntil'
                     ]);
-
       allow delete: if false;
 
       match /transactions/{transactionId} {
-        allow read: if request.auth != null
-                    && request.auth.uid == userId;
-
+        allow read: if request.auth != null && request.auth.uid == userId;
         allow create: if request.auth != null
                       && request.auth.uid == userId
-                      && validUserAccess(userId, database);
-
+                      && request.resource.data.uid == userId
+                      && request.resource.data.type in ['credit','debit']
+                      && request.resource.data.amount is number
+                      && request.resource.data.amount > 0
+                      && request.resource.data.note is string
+                      && request.resource.data.note.size() > 0
+                      && request.resource.data.note.size() <= 120
+                      && request.resource.data.date is string;
         allow update, delete: if false;
       }
     }
-  }
-
-  function validUserAccess(userId, database) {
-    return !exists(/databases/$(database)/documents/users/$(userId))
-      || get(/databases/$(database)/documents/users/$(userId)).data.lockedUntil == null
-      || get(/databases/$(database)/documents/users/$(userId)).data.lockedUntil < request.time;
   }
 }
