@@ -176,7 +176,6 @@ function shell(){
       <button id="logout"><i>↪</i><span>Log out</span></button>
     </nav>
   </div>`;
-  document.querySelectorAll("[data-page]").forEach(b=>b.onclick=(e)=>{e.preventDefault();currentPage=b.dataset.page;renderPage()});
   document.getElementById("logout").onclick=async e=>{
     e.preventDefault();
     e.stopPropagation();
@@ -212,43 +211,52 @@ function setupLiquidNavigation(){
   const nav=document.getElementById("bottomNav"), lens=document.getElementById("liquidLens");
   if(!nav || !lens)return;
   const pages=["home","history","add","download"];
-  let touchStartX=0,touchStartY=0,touchActive=false;
+  let startX=0,startY=0,startPage="",swiping=false;
 
-  // Keep normal button clicks completely independent from the liquid swipe effect.
-  nav.addEventListener("click",e=>{
-    const btn=e.target.closest?.("button[data-page]");
-    if(!btn || !nav.contains(btn))return;
-    const page=btn.dataset.page;
+  const go=page=>{
     if(!pages.includes(page))return;
-    e.preventDefault();
     currentPage=page;
     renderPage();
+  };
+
+  // One simple delegated click handler. No pointer capture, no preventDefault on taps.
+  nav.addEventListener("click",e=>{
+    const btn=e.target.closest?.("button[data-page]");
+    if(!btn || swiping)return;
+    go(btn.dataset.page);
   });
 
-  // Swipe support for touch devices. It never captures the pointer, so taps remain native clicks.
-  nav.addEventListener("touchstart",e=>{
-    if(e.touches.length!==1)return;
-    const t=e.touches[0];
-    touchStartX=t.clientX; touchStartY=t.clientY; touchActive=true;
+  // Swipe only when the user actually drags horizontally.
+  nav.addEventListener("pointerdown",e=>{
+    if(e.pointerType==="mouse" && e.button!==0)return;
+    const btn=e.target.closest?.("button[data-page]");
+    if(!btn)return;
+    startX=e.clientX; startY=e.clientY; startPage=btn.dataset.page; swiping=false;
   },{passive:true});
 
-  nav.addEventListener("touchend",e=>{
-    if(!touchActive || !e.changedTouches.length)return;
-    touchActive=false;
-    const t=e.changedTouches[0],dx=t.clientX-touchStartX,dy=t.clientY-touchStartY;
-    if(Math.abs(dx)<55 || Math.abs(dx)<Math.abs(dy)*1.15)return;
-    const current=pages.indexOf(currentPage);
-    if(current<0)return;
-    const next=current+(dx<0?1:-1);
-    if(next>=0 && next<pages.length){
-      currentPage=pages[next];
-      renderPage();
+  nav.addEventListener("pointermove",e=>{
+    if(!startPage)return;
+    const dx=e.clientX-startX,dy=e.clientY-startY;
+    if(Math.abs(dx)>18 && Math.abs(dx)>Math.abs(dy)*1.2)swiping=true;
+  },{passive:true});
+
+  nav.addEventListener("pointerup",e=>{
+    if(!startPage)return;
+    const dx=e.clientX-startX,dy=e.clientY-startY;
+    const isSwipe=Math.abs(dx)>=55 && Math.abs(dx)>Math.abs(dy)*1.2;
+    if(isSwipe){
+      const i=pages.indexOf(startPage);
+      const next=i+(dx<0?1:-1);
+      if(next>=0 && next<pages.length)go(pages[next]);
     }
+    const wasSwipe=swiping || isSwipe;
+    startPage="";swiping=false;
+    if(wasSwipe)e.stopPropagation();
   },{passive:true});
 
+  nav.addEventListener("pointercancel",()=>{startPage="";swiping=false;},{passive:true});
   updateLiquidLens();
 }
-
 
 async function adminApi(action, payload={}){
   const token=await currentUser.getIdToken();
@@ -578,16 +586,21 @@ function renderAdd(p){
   document.getElementById("txForm").onsubmit=async e=>{
     e.preventDefault();
     const type=document.getElementById("txType").value;
+    const amount=Number(document.getElementById("txAmount").value);
+    const note=document.getElementById("txNote").value.trim();
+    const date=document.getElementById("txDate").value;
+    if(!(amount>0)||!note||!date)return toast("Please fill all transaction details","error");
     try{
-      await addDoc(collection(db,"users",currentUser.uid,"transactions"),{
-        type, amount:Number(document.getElementById("txAmount").value),
-        note:document.getElementById("txNote").value.trim(),
-        date:document.getElementById("txDate").value, uid:currentUser.uid, createdAt:serverTimestamp()
-      });
+      const token=await currentUser.getIdToken();
+      const res=await fetch("/api/user?action=addTransaction",{method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${token}`},body:JSON.stringify({type,amount,note,date})});
+      const data=await res.json().catch(()=>({error:"Invalid server response"}));
+      if(!res.ok)throw new Error(data.error||"Unable to save transaction");
       e.target.reset();
       document.getElementById("txDate").value=iso(new Date());
+      document.getElementById("txType").value="credit";
+      document.querySelectorAll(".type-tab").forEach(x=>x.classList.toggle("active",x.dataset.type==="credit"));
       toast(type==="credit"?"Credit added":"Debit added","success");
-    }catch(err){toast(err.message,"error")}
+    }catch(err){toast(err.message.replace("Firebase: ",""),"error")}
   };
 }
 
@@ -610,7 +623,7 @@ async function deleteOwnTransaction(id){
   if(!passcode.trim())return toast("Passcode is required","error");
   try{
     const token=await currentUser.getIdToken();
-    const res=await fetch(`/api/admin?action=userDeleteTransaction`,{method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${token}`},body:JSON.stringify({transactionId:id,passcode})});
+    const res=await fetch(`/api/user?action=deleteTransaction`,{method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${token}`},body:JSON.stringify({transactionId:id,passcode})});
     const data=await res.json().catch(()=>({error:"Invalid server response"}));
     if(!res.ok)throw new Error(data.error||"Unable to delete transaction");
     toast("Transaction deleted","success");
