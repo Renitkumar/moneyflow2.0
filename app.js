@@ -1,15 +1,13 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-app.js";
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, updateProfile, getIdToken, GoogleAuthProvider, signInWithPopup, sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-auth.js";
 import { getFirestore, doc, setDoc, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
-import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-storage.js";
 import { firebaseConfig } from "./firebase-config.js";
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const storage = getStorage(app);
 const root = document.getElementById("app");
-let currentUser = null, transactions = [], unsubscribe = null, currentPage = "home", dailyTimer = null, profileSaving = false;
+let currentUser = null, transactions = [], unsubscribe = null, profileUnsubscribe = null, currentPage = "home", dailyTimer = null, profileSaving = false, userProfile = {};
 
 const money = n => `₹${Number(n || 0).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2})}`;
 const esc = s => String(s ?? "").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
@@ -165,7 +163,7 @@ function shell(){
       <div class="brand"><span>₹</span><div><b>MoneyFlow</b><small>Track Today, Build Tomorrow</small></div></div>
       <div class="header-actions">
         <button id="adminPanelBtn" class="admin-panel-btn hidden">⚙ Admin Panel</button>
-        <div class="user-chip">${currentUser?.photoURL?`<img src="${esc(currentUser.photoURL)}" alt="">`:`<span class="user-chip-avatar">${esc((currentUser?.displayName||currentUser?.email||"U").slice(0,1).toUpperCase())}</span>`}<span>${esc(currentUser?.displayName||currentUser?.email||"User")}</span></div>
+        <button class="user-chip" id="profileChip" type="button"><span class="user-chip-avatar">${esc((currentUser?.displayName||currentUser?.email||"U").slice(0,1).toUpperCase())}</span><span>${esc(currentUser?.displayName||currentUser?.email||"User")}</span></button>
       </div>
     </header>
     <main class="content"><section id="page"></section></main>
@@ -178,7 +176,7 @@ function shell(){
       <button id="logout"><i>↪</i><span>Log out</span></button>
     </nav>
   </div>`;
-  document.querySelectorAll("[data-page]").forEach(b=>b.onclick=()=>{currentPage=b.dataset.page;renderPage()});
+  document.querySelectorAll("[data-page]").forEach(b=>b.onclick=(e)=>{e.preventDefault();currentPage=b.dataset.page;renderPage()});
   document.getElementById("logout").onclick=async e=>{
     e.preventDefault();
     e.stopPropagation();
@@ -191,6 +189,7 @@ function shell(){
     }
   };
   document.getElementById("adminPanelBtn").onclick=()=>{ currentPage="admin"; renderPage(); };
+  document.getElementById("profileChip").onclick=()=>{ currentPage="profile"; renderPage(); };
   setupLiquidNavigation();
   checkAdminAccess();
   renderPage();
@@ -213,48 +212,33 @@ function setupLiquidNavigation(){
   const nav=document.getElementById("bottomNav"), lens=document.getElementById("liquidLens");
   if(!nav || !lens)return;
   const pages=["home","history","add","download"];
-  let dragging=false,moved=false,startX=0,startY=0,startIndex=0,pointerId=null,tapHandled=false;
+  let dragging=false,moved=false,startX=0,startY=0,startIndex=0,pointerId=null;
   const clamp=(v,min,max)=>Math.max(min,Math.min(max,v));
   const buttons=()=>pages.map(p=>nav.querySelector(`[data-page="${p}"]`)).filter(Boolean);
-
   function paintLens(x,sx=1,sy=1){
     const bs=buttons(); if(!bs.length)return;
     const nr=nav.getBoundingClientRect(),base=bs[startIndex]; if(!base)return;
-    const ar=base.getBoundingClientRect();
-    const width=ar.width, expanded=width*sx;
+    const ar=base.getBoundingClientRect(),width=ar.width,expanded=width*sx;
     const maxX=Math.max(8,nr.width-expanded-8);
     const target=clamp(x-(expanded-width)/2,8,maxX);
     lens.style.width=`${width}px`; lens.style.height=`${ar.height}px`;
     lens.style.transform=`translate3d(${target}px,${ar.top-nr.top-(ar.height*(sy-1)/2)}px,0) scaleX(${sx}) scaleY(${sy})`;
-    lens.style.borderRadius=`${Math.max(18,22/sx)}px`;
-    lens.style.transition="none";
+    lens.style.borderRadius=`${Math.max(18,22/sx)}px`; lens.style.transition="none";
   }
-
   function nearestIndexFromLens(){
     const bs=buttons(),nr=nav.getBoundingClientRect();
-    const m=lens.style.transform.match(/translate3d\(([-\d.]+)px/);
-    const mx=lens.style.transform.match(/scaleX\(([-\d.]+)\)/);
-    const sx=mx?parseFloat(mx[1]):1;
-    const left=m?parseFloat(m[1]):0;
-    const center=left+(lens.offsetWidth*sx)/2;
-    let best=0,dist=Infinity;
+    const m=lens.style.transform.match(/translate3d\(([-\d.]+)px/), mx=lens.style.transform.match(/scaleX\(([-\d.]+)\)/);
+    const sx=mx?parseFloat(mx[1]):1,left=m?parseFloat(m[1]):0,center=left+(lens.offsetWidth*sx)/2;
+    let best=startIndex,dist=Infinity;
     bs.forEach((b,i)=>{const r=b.getBoundingClientRect(),c=r.left-nr.left+r.width/2,d=Math.abs(c-center);if(d<dist){dist=d;best=i;}});
     return best;
   }
-
-  function snapTo(index){currentPage=pages[clamp(index,0,pages.length-1)];renderPage();}
-
-  nav.querySelectorAll("[data-page]").forEach(b=>b.addEventListener("click",e=>{
-    if(tapHandled){tapHandled=false;return;}
-    if(moved){e.preventDefault();return;}
-    const i=pages.indexOf(b.dataset.page); if(i>=0)snapTo(i);
-  }));
-
+  function snapTo(index){const i=clamp(index,0,pages.length-1);currentPage=pages[i];renderPage();}
   nav.addEventListener("pointerdown",e=>{
     if(e.pointerType==="mouse"&&e.button!==0)return;
     const target=e.target.closest?.("[data-page]");
-    const i=target?pages.indexOf(target.dataset.page):pages.indexOf(currentPage);
-    if(i<0)return;
+    if(!target)return;
+    const i=pages.indexOf(target.dataset.page); if(i<0)return;
     const active=nav.querySelector(`[data-page="${pages[i]}"]`); if(!active)return;
     const nr=nav.getBoundingClientRect(),ar=active.getBoundingClientRect();
     dragging=true;moved=false;pointerId=e.pointerId;startX=e.clientX;startY=e.clientY;startIndex=i;
@@ -262,29 +246,20 @@ function setupLiquidNavigation(){
     try{nav.setPointerCapture(e.pointerId)}catch(_){ }
     paintLens(ar.left-nr.left,1,1);
   });
-
   nav.addEventListener("pointermove",e=>{
     if(!dragging||e.pointerId!==pointerId)return;
     const dx=e.clientX-startX,dy=e.clientY-startY;
-    if(Math.abs(dx)>8)moved=true;
-    if(!moved&&Math.abs(dx)<Math.abs(dy)*0.65)return;
+    if(Math.abs(dx)>10&&Math.abs(dx)>=Math.abs(dy)*0.65)moved=true;
+    if(!moved)return;
     e.preventDefault();
     const nr=nav.getBoundingClientRect(),active=nav.querySelector(`[data-page="${pages[startIndex]}"]`);if(!active)return;
-    const ar=active.getBoundingClientRect();
-    const amount=Math.abs(dx)/Math.max(140,nr.width);
-    const sx=1+Math.min(.70,amount*.85);
-    const sy=1+Math.min(.08,amount*.12);
+    const ar=active.getBoundingClientRect(),amount=Math.abs(dx)/Math.max(140,nr.width),sx=1+Math.min(.70,amount*.85),sy=1+Math.min(.08,amount*.12);
     paintLens((ar.left-nr.left)+dx,sx,sy);
   },{passive:false});
-
   function endDrag(e){
     if(!dragging||e.pointerId!==pointerId)return;
-    const wasMoved=moved;
-    const target=e.target.closest?.("[data-page]");
-    const targetIndex=target?pages.indexOf(target.dataset.page):-1;
-    dragging=false;nav.classList.remove("swiping","dragging");
+    const wasMoved=moved; dragging=false; nav.classList.remove("swiping","dragging");
     if(wasMoved){e.preventDefault();snapTo(nearestIndexFromLens());}
-    else if(targetIndex>=0){tapHandled=true;snapTo(targetIndex);setTimeout(()=>tapHandled=false,80);}
     else updateLiquidLens();
     moved=false;pointerId=null;
   }
@@ -366,6 +341,7 @@ async function openAdminUser(u){
       <h3>Account controls</h3>
       <p class="muted">These actions affect only this user's account.</p>
       <div class="action-grid">
+        <button class="secondary" id="changeUserPasscode">Change User Passcode</button>
         <button class="secondary" id="toggleLock">${u.locked?"Unlock temporarily locked user":"Temporary lock"}</button>
         <button class="secondary" id="toggleDisable">${u.disabled?"Enable account":"Disable account"}</button>
         <button class="danger" id="deleteUser">Delete account</button>
@@ -375,6 +351,14 @@ async function openAdminUser(u){
   </div>`;
   document.getElementById("backUsers").onclick=()=>renderAdmin(document.getElementById("page"));
 
+  document.getElementById("changeUserPasscode").onclick=async()=>{
+    const passcode=window.prompt(`Set new passcode for ${u.displayName||u.email||"this user"}:`);
+    if(passcode===null)return;
+    if(!/^\d{4,12}$/.test(passcode))return toast("Passcode must be 4-12 digits","error");
+    const confirmPass=window.prompt("Confirm new passcode:");
+    if(passcode!==confirmPass)return toast("Passcodes do not match","error");
+    try{await adminApi("setUserPasscode",{uid:u.uid,passcode});toast("User passcode changed","success")}catch(e){toast(e.message,"error")}
+  };
   document.getElementById("toggleLock").onclick=async()=>{
     try{await adminApi(u.locked?"unlockUser":"lockUser",{uid:u.uid});toast(u.locked?"User unlocked":"User temporarily locked","success");renderAdmin(document.getElementById("page"))}
     catch(e){toast(e.message,"error")}
@@ -494,103 +478,32 @@ function downloadAdminUserReport(user,txs,from,to){
 }
 
 async function saveProfileName(name){
-  const clean=String(name||"").trim();
-  if(!clean)return toast("Please enter your name","error");
-  if(profileSaving)return;
-  profileSaving=true;
-  try{
-    await updateProfile(currentUser,{displayName:clean});
-    await setDoc(doc(db,"users",currentUser.uid),{displayName:clean,email:currentUser.email||"",photoURL:currentUser.photoURL||"",updatedAt:serverTimestamp()},{merge:true});
-    toast("Profile updated","success");
-    renderPage();
-  }catch(e){toast(e.message.replace("Firebase: ",""),"error")}
-  finally{profileSaving=false;}
+  const clean=String(name||"").trim(); if(!clean)return toast("Please enter your name","error");
+  try{await updateProfile(currentUser,{displayName:clean});await setDoc(doc(db,"users",currentUser.uid),{displayName:clean,email:currentUser.email||"",updatedAt:serverTimestamp()},{merge:true});toast("Profile updated","success");renderPage()}
+  catch(e){toast(e.message.replace("Firebase: ",""),"error")}
 }
-
-async function uploadProfileImage(file){
-  if(!file)return;
-  if(!file.type.startsWith("image/"))return toast("Please select an image file","error");
-  if(file.size>5*1024*1024)return toast("Image must be smaller than 5 MB","error");
-  if(profileSaving)return;
-  profileSaving=true;
-  try{
-    toast("Uploading profile image…","info");
-    const ext=(file.name.split(".").pop()||"jpg").toLowerCase().replace(/[^a-z0-9]/g,"")||"jpg";
-    const r=storageRef(storage,`users/${currentUser.uid}/profile.${ext}`);
-    await uploadBytes(r,file,{contentType:file.type});
-    const url=await getDownloadURL(r);
-    await updateProfile(currentUser,{photoURL:url});
-    await setDoc(doc(db,"users",currentUser.uid),{displayName:currentUser.displayName||"",email:currentUser.email||"",photoURL:url,updatedAt:serverTimestamp()},{merge:true});
-    toast("Profile photo updated","success");
-    renderPage();
-  }catch(e){toast(e.message.replace("Firebase: ",""),"error")}
-  finally{profileSaving=false;}
+async function saveProfileSettings(){
+  const positive=Math.max(1,Math.min(365,Number(document.getElementById("positiveDuration").value||30)));
+  const negative=Math.max(1,Math.min(365,Number(document.getElementById("negativeDuration").value||30)));
+  try{await setDoc(doc(db,"users",currentUser.uid),{positiveDurationDays:positive,negativeDurationDays:negative,updatedAt:serverTimestamp()},{merge:true});toast("Settings saved","success");renderPage()}catch(e){toast(e.message,"error")}
 }
-
+async function resetPnc(field,label){
+  if(!confirm(`Reset ${label}? This cannot be undone.`))return;
+  try{await setDoc(doc(db,"users",currentUser.uid),{[field]:serverTimestamp()},{merge:true});toast(`${label} reset successfully`,"success")}catch(e){toast(e.message,"error")}
+}
 function renderProfile(p){
   const name=currentUser?.displayName||currentUser?.email?.split("@")[0]||"User";
-  const photo=currentUser?.photoURL||"";
-  p.innerHTML=`<section class="profile-page">
-    <div class="profile-head">
-      <div><div class="eyebrow">ACCOUNT</div><h2>My Profile</h2><p class="muted">Manage your name, profile photo and feedback.</p></div>
-      <button class="secondary" id="profileBack">← Home</button>
-    </div>
-    <section class="profile-card glass">
-      <div class="profile-avatar-wrap">
-        <div class="profile-avatar">${photo?`<img src="${esc(photo)}" alt="Profile photo">`:`<span>${esc(name.slice(0,1).toUpperCase())}</span>`}</div>
-        <label class="profile-image-btn" for="profileImageInput">＋ Add new image</label>
-        <input id="profileImageInput" type="file" accept="image/*" hidden>
-        <small>JPG, PNG or other image · max 5 MB</small>
-      </div>
-      <div class="profile-form">
-        <label>Your name<input id="profileName" maxlength="60" value="${esc(name)}"></label>
-        <label>Email address<input value="${esc(currentUser?.email||"")}" disabled></label>
-        <button class="primary wide" id="saveProfile">Save changes</button>
-      </div>
-    </section>
-    <section class="profile-feedback glass">
-      <div class="profile-section-icon">💬</div>
-      <div><h3>Feedback</h3><p class="muted">Tell us what you like, what is confusing, or what we can improve.</p></div>
-      <textarea id="feedbackText" maxlength="1000" placeholder="Write your feedback here…"></textarea>
-      <button class="primary wide" id="sendFeedback">Send feedback</button>
-    </section>
-  </section>`;
+  p.innerHTML=`<section class="profile-page"><div class="profile-head"><div><div class="eyebrow">ACCOUNT</div><h2>My Profile</h2><p class="muted">Manage your name, PNC display duration and manual resets.</p></div><button class="secondary" id="profileBack">← Home</button></div>
+  <section class="profile-card glass"><div class="profile-form"><label>Your name<input id="profileName" maxlength="60" value="${esc(name)}"></label><label>Email address<input value="${esc(currentUser?.email||"")}" disabled></label><button class="primary wide" id="saveProfile">Save name</button></div></section>
+  <section class="profile-settings glass"><div><div class="eyebrow">DISPLAY DURATION</div><h3>Set how long Positive & Negative stay visible</h3></div><div class="input-grid"><label>Positive (days)<input id="positiveDuration" type="number" min="1" max="365" value="${Number(userProfile?.positiveDurationDays||30)}"></label><label>Negative (days)<input id="negativeDuration" type="number" min="1" max="365" value="${Number(userProfile?.negativeDurationDays||30)}"></label></div><button class="primary wide" id="saveDuration">Save duration</button></section>
+  <section class="profile-reset glass"><div class="eyebrow">MANUAL PNC RESET</div><h3>Nothing resets automatically</h3><p class="muted">Use these buttons only when you want to start a fresh PNC total.</p><div class="reset-grid"><button class="secondary" id="resetPositive">Reset Positive</button><button class="secondary" id="resetNegative">Reset Negative</button><button class="secondary" id="resetBalance">Reset Current Balance</button><button class="danger" id="resetAll">Reset All PNC</button></div></section></section>`;
   document.getElementById("profileBack").onclick=()=>{currentPage="home";renderPage()};
-  document.getElementById("profileImageInput").onchange=e=>uploadProfileImage(e.target.files?.[0]);
   document.getElementById("saveProfile").onclick=()=>saveProfileName(document.getElementById("profileName").value);
-  document.getElementById("sendFeedback").onclick=async()=>{
-    const btn=document.getElementById("sendFeedback");
-    const text=document.getElementById("feedbackText").value.trim();
-    if(!text)return toast("Please write some feedback first","error");
-    if(!currentUser?.uid)return toast("Please login again before sending feedback","error");
-    btn.disabled=true;
-    try{
-      await addDoc(collection(db,"users",currentUser.uid,"feedback"),{
-        text,
-        uid:currentUser.uid,
-        email:currentUser.email||"",
-        displayName:currentUser.displayName||name,
-        createdAt:serverTimestamp()
-      });
-      document.getElementById("feedbackText").value="";
-      toast("Feedback sent successfully","success");
-    }catch(e){
-      toast((e.message||"Unable to send feedback").replace("Firebase: ",""),"error");
-    }finally{btn.disabled=false;}
-  };
-}
-
-async function renderFeedbacks(p){
-  p.innerHTML=`<section class="admin-shell">
-    <div class="admin-head"><div><div class="eyebrow">USER FEEDBACK</div><h2>Feedbacks</h2><p class="muted">Messages submitted by MoneyFlow users.</p></div><button class="secondary" id="backAdmin">← Admin</button></div>
-    <section class="admin-card glass"><div id="feedbackList" class="feedback-list"><div class="admin-loading">Loading feedbacks…</div></div></section>
-  </section>`;
-  document.getElementById("backAdmin").onclick=()=>{currentPage="admin";renderPage()};
-  try{
-    const data=await adminApi("feedbacks");
-    const rows=data.feedbacks||[];
-    document.getElementById("feedbackList").innerHTML=rows.length?rows.map(f=>`<article class="feedback-item"><div class="feedback-item-head"><div><b>${esc(f.displayName||"User")}</b><span>${esc(f.email||"")}</span></div><small>${esc(f.createdAtText||"")}</small></div><p>${esc(f.text||"")}</p></article>`).join(""):`<div class="empty"><div>💬</div><h3>No feedback yet</h3><p>User feedback will appear here.</p></div>`;
-  }catch(e){document.getElementById("feedbackList").innerHTML=`<div class="admin-error">${esc(e.message)}</div>`}
+  document.getElementById("saveDuration").onclick=saveProfileSettings;
+  document.getElementById("resetPositive").onclick=()=>resetPnc("positiveResetAt","Positive");
+  document.getElementById("resetNegative").onclick=()=>resetPnc("negativeResetAt","Negative");
+  document.getElementById("resetBalance").onclick=()=>resetPnc("balanceResetAt","Current Balance");
+  document.getElementById("resetAll").onclick=async()=>{if(!confirm("Reset Positive, Negative and Current Balance? This cannot be undone."))return;try{await setDoc(doc(db,"users",currentUser.uid),{positiveResetAt:serverTimestamp(),negativeResetAt:serverTimestamp(),balanceResetAt:serverTimestamp()},{merge:true});toast("All PNC reset successfully","success")}catch(e){toast(e.message,"error")}};
 }
 
 function renderPage(){
@@ -603,59 +516,57 @@ function renderPage(){
   if(currentPage==="add")renderAdd(p);
   if(currentPage==="download")renderDownload(p);
   if(currentPage==="admin")renderAdmin(p);
-  if(currentPage==="feedback")renderFeedbacks(p);
 }
 
+function resetCutoff(key){
+  const v=userProfile?.[key];
+  return v?.toMillis ? v.toMillis() : (v ? new Date(v).getTime() : 0);
+}
+function txAfterReset(t,key){
+  const cutoff=resetCutoff(key); if(!cutoff)return true;
+  const created=t.createdAt?.toMillis ? t.createdAt.toMillis() : (t.createdAt?new Date(t.createdAt).getTime():0);
+  return created ? created>cutoff : true;
+}
+function pncTotals(){
+  const credits=transactions.filter(t=>t.type==="credit"&&txAfterReset(t,"positiveResetAt"));
+  const debits=transactions.filter(t=>t.type==="debit"&&txAfterReset(t,"negativeResetAt"));
+  const balanceRows=transactions.filter(t=>txAfterReset(t,"balanceResetAt"));
+  const credit=credits.reduce((a,t)=>a+Number(t.amount||0),0);
+  const debit=debits.reduce((a,t)=>a+Number(t.amount||0),0);
+  const balance=balanceRows.reduce((a,t)=>a+(t.type==="credit"?Number(t.amount||0):-Number(t.amount||0)),0);
+  return {credit,debit,balance};
+}
+function durationVisible(type){
+  const days=Number(userProfile?.[type+"DurationDays"]||30);
+  const relevant=transactions.filter(t=>t.type===type && txAfterReset(t,type+"ResetAt"));
+  if(!relevant.length)return true;
+  const latest=Math.max(...relevant.map(t=>new Date(t.date+"T23:59:59").getTime()));
+  return (Date.now()-latest)<=days*86400000;
+}
 function renderHome(p){
-  const {credit,debit}=totals(todayTransactions()), balance=credit-debit;
-  const today=dateText(todayKey());
+  const {credit,debit,balance}=pncTotals(), today=dateText(todayKey());
+  const posVisible=durationVisible("positive"), negVisible=durationVisible("negative");
   p.innerHTML=`<section class="hero">
     <div><div class="eyebrow">OVERVIEW · ${today}</div>
       <h1>Good ${new Date().getHours()<12?"Morning":new Date().getHours()<18?"Afternoon":"Evening"}<br>
-      <strong class="home-user"><span class="home-user-avatar">${currentUser?.photoURL?`<img src="${esc(currentUser.photoURL)}" alt="">`:`${esc((currentUser?.displayName?.split(" ")[0]||"there").slice(0,1).toUpperCase())}`}</span>${esc(currentUser?.displayName?.split(" ")[0]||"there")}</strong> 👋</h1>
+      <strong class="home-user"><span class="home-user-avatar">${esc((currentUser?.displayName?.split(" ")[0]||"there").slice(0,1).toUpperCase())}</span>${esc(currentUser?.displayName?.split(" ")[0]||"there")}</strong> 👋</h1>
       <p>Small steps. Big results.</p>
-    </div>
-    <div class="floating-cube">₹<span>✦</span></div>
+    </div><div class="floating-cube">₹<span>✦</span></div>
   </section>
   <section class="dashboard-grid">
-    <article class="stat-card positive">
-      <div class="stat-icon">↗</div><div class="label">POSITIVE</div>
-      <strong>${money(credit)}</strong><small>Today's credits</small>
-    </article>
-    <article class="stat-card negative">
-      <div class="stat-icon">↘</div><div class="label">NEGATIVE</div>
-      <strong>${money(debit)}</strong><small>Today's debits</small>
-    </article>
+    ${posVisible?`<article class="stat-card positive"><div class="stat-icon">↗</div><div class="label">POSITIVE</div><strong>${money(credit)}</strong><small>Duration: ${Number(userProfile?.positiveDurationDays||30)} days</small></article>`:`<article class="stat-card positive faded-stat"><div class="label">POSITIVE</div><strong>Hidden</strong><small>Display duration ended</small></article>`}
+    ${negVisible?`<article class="stat-card negative"><div class="stat-icon">↘</div><div class="label">NEGATIVE</div><strong>${money(debit)}</strong><small>Duration: ${Number(userProfile?.negativeDurationDays||30)} days</small></article>`:`<article class="stat-card negative faded-stat"><div class="label">NEGATIVE</div><strong>Hidden</strong><small>Display duration ended</small></article>`}
   </section>
-  <article class="balance-card ${balance<0?"down":""}">
-    <div class="balance-icon">▣</div><div>
-      <div class="label">CURRENT BALANCE</div><strong>${money(balance)}</strong>
-      <small>${balance>=0?"Today's remaining balance":"Watch today's spending"}</small>
-    </div><div class="balance-arrow">${balance>=0?"↑":"↓"}</div>
-  </article>
+  <article class="balance-card ${balance<0?"down":""}"><div class="balance-icon">▣</div><div><div class="label">CURRENT BALANCE</div><strong>${money(balance)}</strong><small>Does not reset automatically</small></div><div class="balance-arrow">${balance>=0?"↑":"↓"}</div></article>
   <div class="quote">✦<br><b>Discipline today,<br>financial freedom tomorrow.</b></div>`;
 }
-
 function renderHistory(p){
-  p.innerHTML=`<div class="page-head">
-    <div><div class="eyebrow">HISTORY</div><h2>Your records</h2><p class="muted">See when money came in or went out.</p></div>
-  </div>
-  <section class="history-filter glass">
-    <div class="filter-title"><div><div class="eyebrow">HISTORY</div><h2>Your records</h2></div><span class="record-count">${transactions.length} records</span></div>
-    <div class="filter-tabs">
-      <button class="filter-tab active" data-filter="all">All</button>
-      <button class="filter-tab positive-filter" data-filter="credit">↗ Positive</button>
-      <button class="filter-tab negative-filter" data-filter="debit">↘ Negative</button>
-    </div>
-  </section>
-  <div id="historyList">${list(transactions)}</div>`;
-
-  document.querySelectorAll(".filter-tab").forEach(b=>b.onclick=()=>{
-    document.querySelectorAll(".filter-tab").forEach(x=>x.classList.remove("active"));
-    b.classList.add("active");
-    const type=b.dataset.filter;
-    document.getElementById("historyList").innerHTML=list(type==="all"?transactions:transactions.filter(t=>t.type===type));
-  });
+  p.innerHTML=`<div class="page-head"><div><div class="eyebrow">HISTORY</div><h2>Your records</h2><p class="muted">Delete your own records with your personal passcode.</p></div></div>
+  <section class="history-filter glass"><div class="filter-title"><div><div class="eyebrow">HISTORY</div><h2>Your records</h2></div><span class="record-count">${transactions.length} records</span></div>
+  <div class="filter-tabs"><button class="filter-tab active" data-filter="all">All</button><button class="filter-tab positive-filter" data-filter="credit">↗ Positive</button><button class="filter-tab negative-filter" data-filter="debit">↘ Negative</button></div></section>
+  <div id="historyList">${list(transactions,true)}</div>`;
+  document.querySelectorAll(".filter-tab").forEach(b=>b.onclick=()=>{document.querySelectorAll(".filter-tab").forEach(x=>x.classList.remove("active"));b.classList.add("active");const type=b.dataset.filter;document.getElementById("historyList").innerHTML=list(type==="all"?transactions:transactions.filter(t=>t.type===type),true)});
+  document.querySelectorAll(".user-delete-tx").forEach(b=>b.onclick=()=>deleteOwnTransaction(b.dataset.id));
 }
 
 function renderAdd(p){
@@ -710,13 +621,21 @@ function openTx(type){
   },0);
 }
 
-function list(rows){
-  if(!rows.length)return `<div class="empty"><div>₹</div><h3>No transactions yet</h3><p>Add your first credit or debit from History.</p></div>`;
-  return `<div class="tx-list">${rows.map(t=>`<div class="tx">
-    <div class="tx-icon ${t.type}">${t.type==="credit"?"↗":"↘"}</div>
-    <div class="tx-main"><b>${esc(t.note)}</b><span>${dateText(t.date)}</span></div>
-    <strong class="${t.type}">${t.type==="credit"?"+":"−"}${money(t.amount)}</strong>
-  </div>`).join("")}</div>`;
+function list(rows,withDelete=false){
+  if(!rows.length)return `<div class="empty"><div>₹</div><h3>No transactions yet</h3><p>Add your first credit or debit from Add.</p></div>`;
+  return `<div class="tx-list">${rows.map(t=>`<div class="tx"><div class="tx-icon ${t.type}">${t.type==="credit"?"↗":"↘"}</div><div class="tx-main"><b>${esc(t.note)}</b><span>${dateText(t.date)}</span></div><strong class="${t.type}">${t.type==="credit"?"+":"−"}${money(t.amount)}</strong>${withDelete?`<button class="delete-tx user-delete-tx" data-id="${esc(t.id)}" title="Delete transaction">✕</button>`:""}</div>`).join("")}</div>`;
+}
+async function deleteOwnTransaction(id){
+  const passcode=window.prompt("Enter your transaction delete passcode:");
+  if(passcode===null)return;
+  if(!passcode.trim())return toast("Passcode is required","error");
+  try{
+    const token=await currentUser.getIdToken();
+    const res=await fetch(`/api/admin?action=userDeleteTransaction`,{method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${token}`},body:JSON.stringify({transactionId:id,passcode})});
+    const data=await res.json().catch(()=>({error:"Invalid server response"}));
+    if(!res.ok)throw new Error(data.error||"Unable to delete transaction");
+    toast("Transaction deleted","success");
+  }catch(e){toast(e.message,"error")}
 }
 
 function dailyRows(f,t){
@@ -864,9 +783,9 @@ function range(f,t){return transactions.filter(x=>x.date>=f&&x.date<=t).sort((a,
 
 onAuthStateChanged(auth,user=>{
   currentUser=user;
-  if(!user){if(unsubscribe)unsubscribe();if(dailyTimer)clearTimeout(dailyTimer);dailyTimer=null;authView();return}
-  currentPage="home"; shell();
-  scheduleDailyRefresh();
+  if(!user){if(unsubscribe)unsubscribe();if(profileUnsubscribe)profileUnsubscribe();unsubscribe=null;profileUnsubscribe=null;transactions=[];userProfile={};if(dailyTimer)clearTimeout(dailyTimer);dailyTimer=null;authView();return}
+  currentPage="home"; shell(); scheduleDailyRefresh();
+  profileUnsubscribe=onSnapshot(doc(db,"users",user.uid),s=>{userProfile=s.exists()?s.data():{};renderPage()},e=>toast("Profile sync error: "+e.message,"error"));
   const q=query(collection(db,"users",user.uid,"transactions"),orderBy("date","desc"));
   unsubscribe=onSnapshot(q,s=>{transactions=s.docs.map(d=>({id:d.id,...d.data()}));renderPage()},e=>toast("Sync error: "+e.message,"error"));
 });
