@@ -1,11 +1,10 @@
-# MoneyFlow Profile + Feedback Fix
+# MoneyFlow 2.0
 
-This version fixes profile photo/name persistence and feedback sending/admin feedback retrieval.
+Firebase + Vercel finance app.
 
-Firebase setup required:
-- Enable Cloud Storage for Firebase and create the default bucket.
-- Deploy `storage.rules`.
-- Deploy `firestore.rules`.
-- Deploy the included `api/admin.js` to Vercel.
-
-Cloud Storage currently requires the Firebase project to be on the Blaze pay-as-you-go plan.
+Important deployment steps:
+1. Deploy the included `firestore.rules` to Firebase Firestore.
+2. Deploy `api/admin.js` and `api/user.js` with the project on Vercel.
+3. Set Vercel environment variables: ADMIN_UID, FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY, ADMIN_SELF_DELETE_PASSCODE.
+4. The user transaction delete passcode is assigned/changed by the admin from Admin Panel.
+5. User transaction deletion is performed through `/api/user?action=deleteTransaction`; users cannot delete directly through Firestore rules.

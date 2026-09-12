@@ -68,7 +68,7 @@ function authView(mode="login"){
       try{
         const email=document.getElementById("resetEmail").value.trim();
         const actionCodeSettings={
-          url:"https://moneyflow-rouge.vercel.app/",
+          url:"https://moneyflow2-0.vercel.app/",
           handleCodeInApp:false
         };
         await sendPasswordResetEmail(auth,email,actionCodeSettings);
@@ -212,61 +212,40 @@ function setupLiquidNavigation(){
   const nav=document.getElementById("bottomNav"), lens=document.getElementById("liquidLens");
   if(!nav || !lens)return;
   const pages=["home","history","add","download"];
-  let dragging=false,moved=false,startX=0,startY=0,startIndex=0,pointerId=null;
-  const clamp=(v,min,max)=>Math.max(min,Math.min(max,v));
-  const buttons=()=>pages.map(p=>nav.querySelector(`[data-page="${p}"]`)).filter(Boolean);
-  function paintLens(x,sx=1,sy=1){
-    const bs=buttons(); if(!bs.length)return;
-    const nr=nav.getBoundingClientRect(),base=bs[startIndex]; if(!base)return;
-    const ar=base.getBoundingClientRect(),width=ar.width,expanded=width*sx;
-    const maxX=Math.max(8,nr.width-expanded-8);
-    const target=clamp(x-(expanded-width)/2,8,maxX);
-    lens.style.width=`${width}px`; lens.style.height=`${ar.height}px`;
-    lens.style.transform=`translate3d(${target}px,${ar.top-nr.top-(ar.height*(sy-1)/2)}px,0) scaleX(${sx}) scaleY(${sy})`;
-    lens.style.borderRadius=`${Math.max(18,22/sx)}px`; lens.style.transition="none";
-  }
-  function nearestIndexFromLens(){
-    const bs=buttons(),nr=nav.getBoundingClientRect();
-    const m=lens.style.transform.match(/translate3d\(([-\d.]+)px/), mx=lens.style.transform.match(/scaleX\(([-\d.]+)\)/);
-    const sx=mx?parseFloat(mx[1]):1,left=m?parseFloat(m[1]):0,center=left+(lens.offsetWidth*sx)/2;
-    let best=startIndex,dist=Infinity;
-    bs.forEach((b,i)=>{const r=b.getBoundingClientRect(),c=r.left-nr.left+r.width/2,d=Math.abs(c-center);if(d<dist){dist=d;best=i;}});
-    return best;
-  }
-  function snapTo(index){const i=clamp(index,0,pages.length-1);currentPage=pages[i];renderPage();}
-  nav.addEventListener("pointerdown",e=>{
-    if(e.pointerType==="mouse"&&e.button!==0)return;
-    const target=e.target.closest?.("[data-page]");
-    if(!target)return;
-    const i=pages.indexOf(target.dataset.page); if(i<0)return;
-    const active=nav.querySelector(`[data-page="${pages[i]}"]`); if(!active)return;
-    const nr=nav.getBoundingClientRect(),ar=active.getBoundingClientRect();
-    dragging=true;moved=false;pointerId=e.pointerId;startX=e.clientX;startY=e.clientY;startIndex=i;
-    nav.classList.add("swiping","dragging");
-    try{nav.setPointerCapture(e.pointerId)}catch(_){ }
-    paintLens(ar.left-nr.left,1,1);
-  });
-  nav.addEventListener("pointermove",e=>{
-    if(!dragging||e.pointerId!==pointerId)return;
-    const dx=e.clientX-startX,dy=e.clientY-startY;
-    if(Math.abs(dx)>10&&Math.abs(dx)>=Math.abs(dy)*0.65)moved=true;
-    if(!moved)return;
+  let touchStartX=0,touchStartY=0,touchActive=false;
+
+  // Keep normal button clicks completely independent from the liquid swipe effect.
+  nav.addEventListener("click",e=>{
+    const btn=e.target.closest?.("button[data-page]");
+    if(!btn || !nav.contains(btn))return;
+    const page=btn.dataset.page;
+    if(!pages.includes(page))return;
     e.preventDefault();
-    const nr=nav.getBoundingClientRect(),active=nav.querySelector(`[data-page="${pages[startIndex]}"]`);if(!active)return;
-    const ar=active.getBoundingClientRect(),amount=Math.abs(dx)/Math.max(140,nr.width),sx=1+Math.min(.70,amount*.85),sy=1+Math.min(.08,amount*.12);
-    paintLens((ar.left-nr.left)+dx,sx,sy);
-  },{passive:false});
-  function endDrag(e){
-    if(!dragging||e.pointerId!==pointerId)return;
-    const wasMoved=moved; dragging=false; nav.classList.remove("swiping","dragging");
-    if(wasMoved){e.preventDefault();snapTo(nearestIndexFromLens());}
-    else updateLiquidLens();
-    moved=false;pointerId=null;
-  }
-  nav.addEventListener("pointerup",endDrag);
-  nav.addEventListener("pointercancel",endDrag);
-  nav.addEventListener("lostpointercapture",e=>{if(dragging)endDrag(e)});
-  window.addEventListener("resize",updateLiquidLens);
+    currentPage=page;
+    renderPage();
+  });
+
+  // Swipe support for touch devices. It never captures the pointer, so taps remain native clicks.
+  nav.addEventListener("touchstart",e=>{
+    if(e.touches.length!==1)return;
+    const t=e.touches[0];
+    touchStartX=t.clientX; touchStartY=t.clientY; touchActive=true;
+  },{passive:true});
+
+  nav.addEventListener("touchend",e=>{
+    if(!touchActive || !e.changedTouches.length)return;
+    touchActive=false;
+    const t=e.changedTouches[0],dx=t.clientX-touchStartX,dy=t.clientY-touchStartY;
+    if(Math.abs(dx)<55 || Math.abs(dx)<Math.abs(dy)*1.15)return;
+    const current=pages.indexOf(currentPage);
+    if(current<0)return;
+    const next=current+(dx<0?1:-1);
+    if(next>=0 && next<pages.length){
+      currentPage=pages[next];
+      renderPage();
+    }
+  },{passive:true});
+
   updateLiquidLens();
 }
 
@@ -357,7 +336,7 @@ async function openAdminUser(u){
     if(!/^\d{4,12}$/.test(passcode))return toast("Passcode must be 4-12 digits","error");
     const confirmPass=window.prompt("Confirm new passcode:");
     if(passcode!==confirmPass)return toast("Passcodes do not match","error");
-    try{await adminApi("setUserPasscode",{uid:u.uid,passcode});toast("User passcode changed","success")}catch(e){toast(e.message,"error")}
+    try{await adminApi("setPasscode",{uid:u.uid,passcode});toast("User passcode changed","success")}catch(e){toast(e.message,"error")}
   };
   document.getElementById("toggleLock").onclick=async()=>{
     try{await adminApi(u.locked?"unlockUser":"lockUser",{uid:u.uid});toast(u.locked?"User unlocked":"User temporarily locked","success");renderAdmin(document.getElementById("page"))}
